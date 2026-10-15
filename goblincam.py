@@ -17,6 +17,7 @@
     ./goblincam.py set iso 200 shutter 60 wb on focus 0.7   # several at once, applied as one look
     ./goblincam.py preset shorts    # orientation + the whole look, then checked against the camera
     ./goblincam.py state            # one line from the phone: what was asked for | what the camera is doing
+    ./goblincam.py panel            # every setting as a slider on http://localhost:8765, with a still from the feed
 
     setup takes --team ID, --bundle-id ID and --phone MODEL (e.g. iPhone18,2) when
     the defaults are not right. See docs/SETUP.md.
@@ -655,6 +656,191 @@ def obs(mode):
     print(f"obs       {scene}: showing {SOURCE} over {transport} ({settings['input']})")
 
 
+PANEL_PORT = 8765
+
+PANEL_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GoblinCam</title><style>
+:root{color-scheme:dark}body{margin:0;font:14px/1.4 -apple-system,system-ui,sans-serif;background:#18181b;color:#e4e4e7}
+main{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px;max-width:1100px;margin:0 auto;padding:24px}
+h1{font-size:18px;margin:0 0 4px}h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#a1a1aa;margin:20px 0 8px}
+.card{background:#232327;border:1px solid #34343a;border-radius:10px;padding:14px 16px}
+.row{display:grid;grid-template-columns:110px minmax(0,1fr) 70px;gap:10px;align-items:center;margin:8px 0}
+.row output{text-align:right;color:#a1a1aa;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%}select{background:#18181b;color:inherit;border:1px solid #3f3f46;border-radius:6px;padding:4px}
+button{background:#3f3f46;color:#fafafa;border:0;border-radius:6px;padding:7px 12px;margin:0 6px 6px 0;cursor:pointer;font:inherit}
+button:hover{background:#52525b}button.primary{background:#e4e4e7;color:#18181b}
+.toggles label{display:inline-flex;gap:6px;align-items:center;margin:0 14px 6px 0}
+#state{font:12px ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;color:#a1a1aa}
+#msg{min-height:20px;color:#fbbf24;font-size:13px}
+#shot{width:100%;border-radius:10px;background:#000;aspect-ratio:9/16;object-fit:contain}
+.dim{color:#71717a;font-size:12px}
+</style></head><body><main><section>
+<h1>GoblinCam</h1><div class="dim">Changes go straight to the phone. Exposure, white balance and focus stay manual once you move them; <b>Auto</b> hands them back.</div>
+<div id="msg"></div>
+<h2>Presets</h2><div class="card" id="presets"></div>
+<h2>Orientation</h2><div class="card" id="rotations"></div>
+<h2>Exposure</h2><div class="card">
+ <div class="row"><span>ISO</span><input type="range" id="iso" min="25" max="3200" step="5"><output></output></div>
+ <div class="row"><span>Shutter 1/</span><select id="shutter"></select><output></output></div>
+ <div class="row"><span>Bias (EV)</span><input type="range" id="bias" min="-2" max="2" step="0.1"><output></output></div>
+ <button onclick="send('lock')">Lock exposure + WB where they are</button><button onclick="send('auto')">Auto</button>
+</div>
+<h2>White balance</h2><div class="card">
+ <div class="row"><span>Temperature</span><input type="range" id="temp" min="2500" max="8000" step="50"><output></output></div>
+ <div class="row"><span>Tint</span><input type="range" id="tint" min="-150" max="150" step="1"><output></output></div>
+</div>
+<h2>Lens</h2><div class="card">
+ <div class="row"><span>Focus</span><input type="range" id="focus" min="0" max="1" step="0.01"><output></output></div>
+ <div class="row"><span>Zoom</span><input type="range" id="zoom" min="1" max="4" step="0.1"><output></output></div>
+ <div class="row"><span>Bitrate (Mb/s)</span><input type="range" id="bitrate" min="5" max="80" step="1"><output></output></div>
+ <div class="toggles">
+  <label><input type="checkbox" id="stabilization">Stabilisation (crops in)</label>
+  <label><input type="checkbox" id="focuslock">Focus locked</label>
+ </div>
+</div>
+<h2>What the phone reports</h2><div class="card"><div id="state">...</div></div>
+</section><aside>
+<h2 style="margin-top:0">Picture</h2><img id="shot" alt="A still from the camera">
+<button class="primary" onclick="shot()">Refresh still</button><label class="dim"><input type="checkbox" id="autoshot"> after every change</label>
+<p class="dim">A still pulled from the live feed (OBS keeps the full stream). Takes a second or two.</p>
+</aside></main><script>
+const msg = (t) => document.getElementById('msg').textContent = t || '';
+async function post(path, body) {
+  const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+  const j = await r.json(); msg(j.ok ? '' : j.reply); refresh(); if (document.getElementById('autoshot').checked) setTimeout(shot, 800); return j;
+}
+const send = (cmd) => post('/command', {cmd});
+const set = (key, value) => post('/set', {pairs: [[key, String(value)]]});
+const SHUTTERS = [24, 25, 30, 48, 50, 60, 100, 120, 125, 180, 250, 500, 1000];
+const sh = document.getElementById('shutter');
+SHUTTERS.forEach(v => sh.add(new Option(v, v)));
+sh.onchange = () => set('shutter', sh.value);
+let timers = {};
+for (const id of ['iso', 'bias', 'temp', 'tint', 'focus', 'zoom', 'bitrate']) {
+  const el = document.getElementById(id), out = el.nextElementSibling;
+  el.oninput = () => { out.textContent = el.value; clearTimeout(timers[id]); timers[id] = setTimeout(() => set(id, el.value), 250); };
+}
+for (const id of ['stabilization', 'focuslock']) {
+  const el = document.getElementById(id); el.onchange = () => set(id, el.checked ? 'on' : 'off');
+}
+let seeded = false;
+function seed(state) {
+  const device = state.split('| device')[1] || '';
+  const put = (id, v) => { if (v == null) return; const el = document.getElementById(id); el.value = v; if (el.nextElementSibling) el.nextElementSibling.textContent = v; };
+  put('iso', (device.match(/iso=(\\d+)/) || [])[1]);
+  put('focus', (device.match(/focus=\\w+ ([\\d.]+)/) || [])[1]);
+  put('zoom', (state.match(/zoom=([\\d.]+)/) || [])[1]);
+  const s = device.match(/ 1\\/(\\d+)/); if (s && SHUTTERS.includes(+s[1])) sh.value = s[1];
+}
+async function refresh() {
+  const j = await (await fetch('/state')).json();
+  document.getElementById('state').textContent = j.state;
+  document.getElementById('stabilization').checked = /\\| device .*stab=on/.test(j.state);
+  document.getElementById('focuslock').checked = /\\| device .*focus=locked/.test(j.state);
+  if (!seeded && !j.state.startsWith('error')) { seed(j.state); seeded = true; }
+}
+async function shot() { document.getElementById('shot').src = '/snapshot?t=' + Date.now(); }
+(async () => {
+  const j = await (await fetch('/presets')).json();
+  const p = document.getElementById('presets');
+  j.presets.forEach(n => { const b = document.createElement('button'); b.textContent = n; b.className = 'primary'; b.onclick = () => post('/preset', {name: n}); p.append(b); });
+  const r = document.getElementById('rotations');
+  j.rotations.forEach(n => { const b = document.createElement('button'); b.textContent = n; b.onclick = () => post('/rotate', {which: n}); r.append(b); });
+  refresh(); shot(); setInterval(refresh, 2000);
+})();
+</script></body></html>"""
+
+
+def panel():
+    """A page on this Mac (http://localhost:8765) with every camera setting as a
+    slider or a button, the phone's own report, and a still from the feed. It
+    sends the same commands the terminal does: presets and rotation go through
+    preset() and rotate(), so the OBS source is still hidden while the camera
+    turns. Local only: it listens on 127.0.0.1."""
+    import contextlib, io
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    presets = {**PRESETS, **cfg().get("presets", {})}
+    lock = threading.Lock()   # one change at a time, as from one terminal
+
+    def run(fn, *args):
+        out = io.StringIO()
+        with lock, contextlib.redirect_stdout(out):
+            try:
+                fn(*args)
+                ok = True
+            except SystemExit as e:
+                ok = False
+                if e.code not in (None, 0):
+                    print(e.code)
+        return ok, out.getvalue().strip()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def reply(self, code, body, kind="application/json"):
+            data = body if isinstance(body, bytes) else json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", kind)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            path = self.path.split("?", 1)[0]
+            if path == "/":
+                return self.reply(200, PANEL_HTML.encode(), "text/html; charset=utf-8")
+            if path == "/presets":
+                return self.reply(200, {"presets": list(presets), "rotations": list(ANGLES)})
+            if path == "/state":
+                host, _ = endpoint(quiet=True)
+                return self.reply(200, {"state": control("state", host)})
+            if path == "/snapshot":
+                host, _ = endpoint(quiet=True)
+                r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", f"tcp://{host}:{PORT}", "-frames:v", "1",
+                                    "-vf", "scale=540:-2", "-f", "image2", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"],
+                                   capture_output=True, timeout=20)
+                if r.returncode == 0 and r.stdout:
+                    return self.reply(200, r.stdout, "image/jpeg")
+                return self.reply(503, {"ok": False, "reply": "no picture: is the stream up?"})
+            self.reply(404, {"ok": False, "reply": "not here"})
+
+        def do_POST(self):
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            except ValueError:
+                body = {}
+            path = self.path
+            if path == "/set":
+                pairs = body.get("pairs") or []
+                if not pairs or any(not re.fullmatch(r"[a-z]+", str(k)) or not re.fullmatch(r"[\w.+-]+", str(v)) for k, v in pairs):
+                    return self.reply(400, {"ok": False, "reply": "set takes key value pairs"})
+                host, _ = endpoint(quiet=True)
+                with lock:
+                    r = control("set " + " ".join(f"{k} {v}" for k, v in pairs), host)
+                return self.reply(200, {"ok": not r.startswith("error"), "reply": r})
+            if path == "/command" and body.get("cmd") in ("lock", "auto"):
+                host, _ = endpoint(quiet=True)
+                with lock:
+                    r = control(body["cmd"], host)
+                return self.reply(200, {"ok": not r.startswith("error"), "reply": r})
+            if path == "/rotate" and body.get("which") in ANGLES:
+                ok, out = run(rotate, body["which"])
+                return self.reply(200, {"ok": ok, "reply": out})
+            if path == "/preset" and body.get("name") in presets:
+                ok, out = run(preset, body["name"])
+                return self.reply(200, {"ok": ok, "reply": out})
+            self.reply(400, {"ok": False, "reply": "unknown request"})
+
+    server = ThreadingHTTPServer(("127.0.0.1", PANEL_PORT), Handler)
+    print(f"panel     http://localhost:{PANEL_PORT}  (Ctrl-C stops it)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
 def main():
     cmd, *a = sys.argv[1:] or ["status"]
     if cmd == "setup":
@@ -680,6 +866,8 @@ def main():
         print(control("state", host))
     elif cmd == "obs" and a and a[0] in ("on", "off", "continuity"):
         obs(a[0])
+    elif cmd == "panel":
+        panel()
     else:
         raise SystemExit(__doc__)
 
