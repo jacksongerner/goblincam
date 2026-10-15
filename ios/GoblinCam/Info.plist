@@ -22,6 +22,16 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_goblincam._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>GoblinCam uses the camera to send a 4K vertical video feed to your Mac.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>GoblinCam serves the video feed to your Mac over the local network. Not needed when connected by USB.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>GoblinCam sends the phone microphone alongside the picture, so the video delay can be measured against your real microphone afterwards.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
@@ -29,25 +39,15 @@
 	</dict>
 	<key>UIRequiresFullScreen</key>
 	<true/>
+	<key>UIStatusBarHidden</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>UIStatusBarHidden</key>
-	<true/>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
-	<key>NSCameraUsageDescription</key>
-	<string>GoblinCam uses the camera to send a 4K vertical video feed to your Mac.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>GoblinCam sends the phone microphone alongside the picture, so the video delay can be measured against your real microphone afterwards.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>GoblinCam serves the video feed to your Mac over the local network. Not needed when connected by USB.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_goblincam._tcp</string>
-	</array>
 </dict>
 </plist>

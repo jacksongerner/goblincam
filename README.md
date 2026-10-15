@@ -71,7 +71,7 @@ through every one.
 ./goblincam.py lock             # freeze exposure and white balance where they are
 ./goblincam.py auto             # hand them back to the camera
 ./goblincam.py set focus 0.7    # zoom bias iso shutter temp tint focus bitrate
-./goblincam.py set exposure on  # exposure wb focuslock: on | off
+./goblincam.py set exposure on  # exposure wb focuslock stabilization: on | off
 ./goblincam.py state            # one line: rotation, size, fps, clients, exposure, wb, focus
 ```
 

@@ -13,7 +13,7 @@
     ./goblincam.py lock             # freeze exposure and white balance where they are
     ./goblincam.py auto             # hand them back to the camera
     ./goblincam.py set focus 0.7    # zoom bias iso shutter temp tint focus bitrate
-    ./goblincam.py set exposure on  # exposure wb focuslock: on | off
+    ./goblincam.py set exposure on  # exposure wb focuslock stabilization: on | off
     ./goblincam.py set iso 200 shutter 60 wb on focus 0.7   # several at once, applied as one look
     ./goblincam.py preset shorts    # orientation + the whole look, then checked against the camera
     ./goblincam.py state            # one line from the phone: what was asked for | what the camera is doing
@@ -49,6 +49,9 @@ OBS_CFG = os.path.expanduser(
 PROFILE_DIRS = ["~/Library/Developer/Xcode/UserData/Provisioning Profiles",
                 "~/Library/MobileDevice/Provisioning Profiles"]
 UUID_RE = r"\b[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\b"
+# Newer devicectl lists a paired phone by its UDID ("00008150-000878A20C08401C (UDID)")
+# instead of a CoreDevice UUID; devicectl takes either for --device.
+UDID_RE = r"\b[0-9A-F]{8}-[0-9A-F]{16}\b"
 ANGLES = {"portrait": 90, "landscape": 0, "portrait-flipped": 270, "landscape-flipped": 180}
 
 # A whole shot in one command: orientation plus a manual look. Manual rather than
@@ -56,7 +59,7 @@ ANGLES = {"portrait": 90, "landscape": 0, "portrait-flipped": 270, "landscape-fl
 # the background with it; a fixed ISO and shutter leave the key light in charge of
 # the face and the room dark. Tune per room in config.json under "presets".
 PRESETS = {
-    "shorts":   {"rotate": "portrait",  "look": {"iso": 200, "shutter": 60, "wb": "on", "focus": 0.7}},
+    "shorts":   {"rotate": "portrait",  "look": {"iso": 200, "shutter": 60, "wb": "on", "focus": 0.7, "stabilization": "on"}},
     "longform": {"rotate": "landscape", "look": {"iso": 200, "shutter": 60, "wb": "on", "focus": 0.7}},
 }
 
@@ -290,7 +293,7 @@ def device_id():
         rows = [l for l in rows if model in l]
     rows.sort(key=lambda l: 0 if " connected" in l else 1 if " available" in l else 2)
     for line in rows:
-        m = re.search(UUID_RE, line)
+        m = re.search(UUID_RE, line) or re.search(UDID_RE, line)
         if m:
             return m.group(0)
     return None
@@ -395,6 +398,12 @@ def preset(name):
         problems.append("white balance is not locked")
     if "focus" in look_ and "focus=locked" not in device:
         problems.append("focus is not locked")
+    if look_.get("stabilization") in ("on", "off"):
+        want = look_["stabilization"]
+        if "stab=unsupported" in device:
+            problems.append("this camera format has no stabilisation")
+        elif f"stab={want}" not in device:
+            problems.append(f"stabilisation is not {want} (an app build from before 2026-10-15 cannot switch it: ./goblincam.py install)")
     if problems:
         sys.exit("check     " + "; ".join(problems))
     print(f"check     {name}: the camera matches")
