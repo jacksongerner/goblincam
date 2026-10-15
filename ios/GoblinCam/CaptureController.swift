@@ -210,6 +210,7 @@ final class CaptureController: NSObject, ObservableObject {
             return "rotation=\(rotation) size=\(outputSize) fps=\(frameRate) clients=\(stats.clients) "
                 + "zoom=\(String(format: "%.1f", zoom)) exposure=\(exposureSummary) wb=\(whiteBalanceSummary) "
                 + "focus=\(lockFocus ? String(format: "locked %.2f", lensPosition) : "auto") "
+                + "stab=\(stabilization ? "on" : "off") "
                 + "| device \(deviceReadout())"
         default:
             return "error unknown command"
@@ -246,6 +247,8 @@ final class CaptureController: NSObject, ObservableObject {
         case "exposure": return flag { self.manualExposure = false; self.lockExposure = $0 }
         case "wb": return flag { self.manualWhiteBalance = false; self.lockWhiteBalance = $0 }
         case "focuslock": return flag { self.lockFocus = $0 }
+        // Standard stabilisation crops in a little; it reconfigures the connection, so the encoder restarts.
+        case "stabilization", "stab": return flag { self.stabilization = $0 }
         default:
             return .failure(SettingError("unknown key \(key)"))
         }
@@ -276,8 +279,15 @@ final class CaptureController: NSObject, ObservableObject {
         }
         let wb = device.whiteBalanceMode == .locked ? "locked" : "auto"
         let focus = device.focusMode == .locked ? "locked" : "auto"
+        // What the connection is really doing: the active mode, not the one asked for.
+        let stab: String
+        if let connection = output.connection(with: .video), connection.isVideoStabilizationSupported {
+            stab = connection.activeVideoStabilizationMode == .off ? "off" : "on"
+        } else {
+            stab = "unsupported"
+        }
         return "exposure=\(exposure) iso=\(Int(device.iso.rounded())) \(shutter) wb=\(wb) "
-            + "focus=\(focus) \(String(format: "%.2f", device.lensPosition)) queue=\(queue)"
+            + "focus=\(focus) \(String(format: "%.2f", device.lensPosition)) stab=\(stab) queue=\(queue)"
     }
 
     private var exposureSummary: String {
