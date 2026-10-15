@@ -20,6 +20,19 @@ the real mic on tracks 1 and 2, and set the recording to write tracks 1 and 3.
 Check the level meter moves before you record -- a silent track means the app
 has no microphone permission, and the fallback below is what you have.
 
+## Lining up the screen live
+
+A screen capture, the mic and any other camera are real time, so in the shot
+they run ahead of the phone. `./goblincam.py sync` (or **Sync now** in the
+panel) listens for six seconds while you talk or clap, measures the lag as OBS
+itself sees it -- the GoblinCam source's microphone level against the real
+mic's, off OBS's own meters -- and holds every screen and camera source back by
+it (Render Delay filters named `GoblinCam sync`, chained past OBS's 500 ms
+limit) and every mic by the same sync offset. Camera, screen and voice then
+line up in the preview and the recording. Run it before each take; `sync off`
+puts everything back to real time. `sync 700` applies a known number without
+listening.
+
 ## What the lag does
 
 Measured across real recording sessions:

@@ -17,6 +17,8 @@
     ./goblincam.py set iso 200 shutter 60 wb on focus 0.7   # several at once, applied as one look
     ./goblincam.py preset shorts    # orientation + the whole look, then checked against the camera
     ./goblincam.py state            # one line from the phone: what was asked for | what the camera is doing
+    ./goblincam.py sync             # measure the camera's delay; hold the screen and mic back to match it
+    ./goblincam.py sync off         # put the screen and mic back to real time
     ./goblincam.py panel            # every setting as a slider on http://localhost:8765, with a still from the feed
 
     setup takes --team ID, --bundle-id ID and --phone MODEL (e.g. iPhone18,2) when
@@ -484,7 +486,7 @@ def status():
 
 # --- OBS ---------------------------------------------------------------------
 
-def obs_connect(optional=False):
+def obs_connect(optional=False, events=None):
     """A live obs-websocket 5 session. Port and password come from OBS's own
     config, so there is nothing to set up beyond enabling the server."""
     try:
@@ -508,6 +510,8 @@ def obs_connect(optional=False):
         sys.exit("OBS is not running (nothing listening on obs-websocket). Open OBS and retry.")
     hello = json.loads(ws.recv())
     ident = {"op": 1, "d": {"rpcVersion": 1}}
+    if events is not None:
+        ident["d"]["eventSubscriptions"] = events
     auth = hello["d"].get("authentication")
     if auth:
         secret = base64.b64encode(
@@ -656,6 +660,155 @@ def obs(mode):
     print(f"obs       {scene}: showing {SOURCE} over {transport} ({settings['input']})")
 
 
+# --- Lining the screen and the mic up with the camera -----------------------
+#
+# The picture reaches OBS 0.5-0.9 s after the mic hears the same moment, a
+# different amount on each connection, creeping up through a session, but
+# steady within one take (docs/SYNC.md). Anything real-time in the shot -- the
+# screen, the mic, another camera -- is therefore early against the face. `sync`
+# measures the lag as OBS itself sees it and holds those sources back by it:
+# the phone's microphone travels in the GoblinCam source exactly as late as its
+# picture, so the gap between its level and the real mic's level, read off
+# OBS's own meters while someone talks, is the delay to add. Run it before each
+# take: a connection or a long session moves the number.
+
+SYNC_FILTER = "GoblinCam sync"
+SYNC_VIDEO_KINDS = ("screen_capture", "display_capture", "window_capture", "macos-avcapture", "av_capture_input")
+SYNC_AUDIO_KINDS = ("coreaudio_input_capture", "sck_audio_capture")
+GPU_DELAY_MAX_MS = 500        # OBS's Render Delay filter tops out here; longer lags chain two
+METER_EVENTS = 1 << 16        # obs-websocket's InputVolumeMeters subscription (high-volume, ~20 a second)
+
+
+def meter_levels(seconds, names):
+    """Each named input's loudness, sampled from OBS's own meters for `seconds`:
+    {name: [(t, dB), ...]}. The input's raw peak, before its fader, so a
+    GoblinCam source muted in the mix still reads."""
+    import math
+    ws = obs_connect(events=METER_EVENTS)
+    ws.settimeout(2)
+    out = {n: [] for n in names}
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            msg = json.loads(ws.recv())
+        except (websocket.WebSocketTimeoutException, OSError):
+            continue
+        d = msg.get("d", {})
+        if msg.get("op") != 5 or d.get("eventType") != "InputVolumeMeters":
+            continue
+        t = time.time()
+        for inp in d["eventData"]["inputs"]:
+            if inp["inputName"] in out:
+                peaks = [ch[2] if len(ch) > 2 else ch[-1] for ch in inp.get("inputLevelsMul") or []]
+                level = max(peaks) if peaks else 0.0
+                out[inp["inputName"]].append((t, 20 * math.log10(level) if level > 1e-5 else -100.0))
+    ws.close()
+    return out
+
+
+def measure_lag(mic, cam, seconds=6.0, max_ms=1500):
+    """How far the camera's audio trails the mic's, in ms, and how well the two
+    match (0-1): their loudness envelopes cross-correlated on a 10 ms grid."""
+    import bisect
+    levels = meter_levels(seconds, [mic, cam])
+    a, b = levels[mic], levels[cam]
+    if len(a) < 40 or len(b) < 40:
+        return None, 0.0, "OBS sent too few meter readings -- is OBS open with both sources in the scene?"
+    t0, t1 = max(a[0][0], b[0][0]), min(a[-1][0], b[-1][0])
+    step = 0.01
+
+    def grid(series):
+        ts = [x for x, _ in series]
+        vs = [max(v, -60.0) for _, v in series]
+        out, t = [], t0
+        while t <= t1:
+            i = min(max(bisect.bisect_left(ts, t), 1), len(ts) - 1)
+            ta, tb = ts[i - 1], ts[i]
+            w = 0 if tb == ta else (t - ta) / (tb - ta)
+            out.append(vs[i - 1] + (vs[i] - vs[i - 1]) * min(max(w, 0), 1))
+            t += step
+        mean = sum(out) / len(out)
+        return [v - mean for v in out]
+
+    x, y = grid(a), grid(b)
+    if max(x) - min(x) < 12 or max(y) - min(y) < 12:
+        return None, 0.0, "not enough sound -- talk or clap while it listens"
+    best, best_k, scores = -2.0, 0, {}
+    for k in range(0, int(max_ms / 10) + 1):
+        n = len(x) - k
+        if n < 100:
+            break
+        xs, ys = x[:n], y[k:k + n]
+        num = sum(p * q for p, q in zip(xs, ys))
+        den = (sum(p * p for p in xs) * sum(q * q for q in ys)) ** 0.5 or 1
+        scores[k] = num / den
+        if scores[k] > best:
+            best, best_k = scores[k], k
+    # parabolic refinement around the peak
+    l, c, r = scores.get(best_k - 1), best, scores.get(best_k + 1)
+    shift = 0.0
+    if l is not None and r is not None and (l - 2 * c + r) != 0:
+        shift = 0.5 * (l - r) / (l - 2 * c + r)
+    return round((best_k + shift) * 10), best, None
+
+
+def sync_inputs(ws):
+    inputs = call(ws, "GetInputList")["inputs"]
+    video = [i["inputName"] for i in inputs if i["inputKind"] in SYNC_VIDEO_KINDS]
+    audio = [i["inputName"] for i in inputs if i["inputKind"] in SYNC_AUDIO_KINDS]
+    return video, audio
+
+
+def apply_delay(ws, ms):
+    """Hold every real-time video source back by `ms` (Render Delay filters,
+    chained past OBS's 500 ms each) and every real mic by the same."""
+    video, audio = sync_inputs(ws)
+    for name in video:
+        for f in call(ws, "GetSourceFilterList", {"sourceName": name})["filters"]:
+            if f["filterName"].startswith(SYNC_FILTER):
+                call(ws, "RemoveSourceFilter", {"sourceName": name, "filterName": f["filterName"]})
+        left, n = ms, 1
+        while left > 0:
+            chunk = min(left, GPU_DELAY_MAX_MS)
+            call(ws, "CreateSourceFilter", {"sourceName": name, "filterName": SYNC_FILTER if n == 1 else f"{SYNC_FILTER} {n}",
+                                            "filterKind": "gpu_delay", "filterSettings": {"delay_ms": chunk}})
+            left -= chunk
+            n += 1
+    for name in audio:
+        call(ws, "SetInputAudioSyncOffset", {"inputName": name, "inputAudioSyncOffset": ms})
+    return video, audio
+
+
+def sync(arg=None):
+    ws = obs_connect()
+    if arg == "off":
+        video, audio = apply_delay(ws, 0)
+        print(f"sync      off: {', '.join(video + audio) or 'nothing'} back to real time")
+        return
+    scene = call(ws, "GetCurrentProgramScene")["currentProgramSceneName"]
+    items = call(ws, "GetSceneItemList", {"sceneName": scene})["sceneItems"]
+    kinds = {i["inputName"]: i["inputKind"] for i in call(ws, "GetInputList")["inputs"]}
+    mics = [it["sourceName"] for it in items if kinds.get(it["sourceName"]) in SYNC_AUDIO_KINDS and it["sceneItemEnabled"]]
+    if SOURCE not in [it["sourceName"] for it in items]:
+        sys.exit(f"sync      {SOURCE} is not in {scene} -- ./goblincam.py obs on first")
+    if not mics:
+        sys.exit(f"sync      no microphone source showing in {scene}")
+    mic = mics[0]
+    if arg and arg.isdigit():
+        ms = int(arg)
+    else:
+        print(f"sync      listening for 6 s: talk (or clap a few times) so {mic} and the phone both hear it")
+        ms, score, problem = measure_lag(mic, SOURCE)
+        if problem:
+            sys.exit(f"sync      {problem}")
+        print(f"          the camera is {ms} ms behind {mic} (match {score:.2f})")
+        if score < 0.5:
+            sys.exit("sync      the two did not line up clearly -- speak up, keep the room quiet, and run it again")
+    video, audio = apply_delay(ws, ms)
+    print(f"sync      held back {ms} ms: {', '.join(video + audio)}")
+    print("          run it again before each take: the delay moves with each connection and creeps up over a session")
+
+
 PANEL_PORT = 8765
 
 PANEL_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -679,6 +832,11 @@ button:hover{background:#52525b}button.primary{background:#e4e4e7;color:#18181b}
 <div id="msg"></div>
 <h2>Presets</h2><div class="card" id="presets"></div>
 <h2>Orientation</h2><div class="card" id="rotations"></div>
+<h2>Line up screen + mic with the camera</h2><div class="card">
+ <div class="dim">The camera arrives late. Press Sync, then talk or clap for six seconds: your screen and mic get held back to match. Do it before each take.</div>
+ <p><button class="primary" id="syncbtn" onclick="doSync()">Sync now</button><button onclick="post('/sync', {off: true}).then(j => syncout.textContent = j.reply)">Back to real time</button></p>
+ <div id="syncout" class="dim"></div>
+</div>
 <h2>Exposure</h2><div class="card">
  <div class="row"><span>ISO</span><input type="range" id="iso" min="25" max="3200" step="5"><output></output></div>
  <div class="row"><span>Shutter 1/</span><select id="shutter"></select><output></output></div>
@@ -738,6 +896,11 @@ async function refresh() {
   document.getElementById('stabilization').checked = /\\| device .*stab=on/.test(j.state);
   document.getElementById('focuslock').checked = /\\| device .*focus=locked/.test(j.state);
   if (!seeded && !j.state.startsWith('error')) { seed(j.state); seeded = true; }
+}
+async function doSync() {
+  const b = document.getElementById('syncbtn'), o = document.getElementById('syncout');
+  b.disabled = true; o.textContent = 'Listening for 6 seconds: talk or clap now...';
+  const j = await post('/sync', {}); o.textContent = j.reply; b.disabled = false;
 }
 async function shot() { document.getElementById('shot').src = '/snapshot?t=' + Date.now(); }
 (async () => {
@@ -828,6 +991,9 @@ def panel():
             if path == "/rotate" and body.get("which") in ANGLES:
                 ok, out = run(rotate, body["which"])
                 return self.reply(200, {"ok": ok, "reply": out})
+            if path == "/sync":
+                ok, out = run(sync, "off" if body.get("off") else None)
+                return self.reply(200, {"ok": ok, "reply": out})
             if path == "/preset" and body.get("name") in presets:
                 ok, out = run(preset, body["name"])
                 return self.reply(200, {"ok": ok, "reply": out})
@@ -868,6 +1034,8 @@ def main():
         obs(a[0])
     elif cmd == "panel":
         panel()
+    elif cmd == "sync":
+        sync(a[0] if a else None)
     else:
         raise SystemExit(__doc__)
 
